@@ -1,12 +1,6 @@
-[submodule "handmocap/MeshGraphormer"]
-	path = handmocap/MeshGraphormer
-	url = https://github.com/arkincognito/MeshGraphormer.git
 [submodule "handmocap/hand_modules/MeshGraphormer"]
 	path = handmocap/hand_modules/MeshGraphormer
 	url = https://github.com/arkincognito/MeshGraphormer.git
 [submodule "handmocap/hand_modules/apex"]
 	path = handmocap/hand_modules/apex
 	url = https://github.com/NVIDIA/apex.git
-[submodule "handmocap/hand_modules/Hand4Whole_RELEASE"]
-	path = handmocap/hand_modules/Hand4Whole_RELEASE
-	url = https://github.com/mks0601/Hand4Whole_RELEASE.git
