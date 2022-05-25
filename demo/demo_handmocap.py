@@ -12,8 +12,10 @@ from demo.demo_options import DemoOptions
 import mocap_utils.general_utils as gnu
 import mocap_utils.demo_utils as demo_utils
 
-# from handmocap.hand_mocap_api import HandMocap
-from handmocap.mesh_graphormer_api import HandMocap
+from handmocap.hand_mocap_api import HandMocap
+
+# from handmocap.hands4whole_api import HandMocap
+# from handmocap.mesh_graphormer_api import HandMocap
 from handmocap.hand_bbox_detector import HandBboxDetector
 
 import renderer.image_utils as imu

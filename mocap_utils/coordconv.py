@@ -48,8 +48,9 @@ def convert_bbox_to_oriIm(data3D, boxScale_o2n, bboxTopLeft, imgSizeW, imgSizeH)
         assert isinstance(bboxTopLeft, tuple)
         assert len(bboxTopLeft) == 2
         bboxTopLeft = np.array(bboxTopLeft)
-
-    data3D = data3D.detach().cpu().numpy()
+    if type(data3D) == torch.Tensor:
+        data3D = data3D.detach().cpu().numpy()
+    
     data3D[:, :2] += bboxTopLeft + resnet_input_size_half / boxScale_o2n
 
     return data3D

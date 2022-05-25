@@ -7,33 +7,62 @@ import numpy as np
 import cv2
 import gc
 from torchvision.transforms import transforms
+from bodymocap.body_bbox_detector import BodyPoseEstimator
+from bodymocap.utils.imutils import process_image_bbox
 
-from handmocap.hand_modules.mesh_graphormer_options import MeshGraphormerOptions
+from handmocap.hand_modules.test_options import TestOptions
 from handmocap.hand_modules.h3dw_model import H3DWModel
 from mocap_utils.coordconv import convert_smpl_to_bbox, convert_bbox_to_oriIm
 
-from .hand_modules.MeshGraphormer.src.modeling.bert import BertConfig, Graphormer
-from .hand_modules.MeshGraphormer.src.modeling.bert import Graphormer_Hand_Network as Graphormer_Network
-from .hand_modules.MeshGraphormer.src.modeling._mano import MANO, Mesh
-from .hand_modules.MeshGraphormer.src.modeling.hrnet.config import config as hrnet_config
-from .hand_modules.MeshGraphormer.src.modeling.hrnet.config import update_config as hrnet_update_config
-from .hand_modules.MeshGraphormer.src.modeling.hrnet.hrnet_cls_net_gridfeat import get_cls_net_gridfeat
 from torchvision import transforms
 from torchvision.transforms.functional import to_pil_image
 import mocap_utils.general_utils as gnu
 
+from .hand_modules.Hand4Whole_RELEASE.main.model import get_model
+from torch.nn.parallel.data_parallel import DataParallel
+import smplx
+from .hand_modules.Hand4Whole_RELEASE.main import config as cfg
+from .hand_modules.Hand4Whole_RELEASE.common.utils.preprocessing import generate_patch_image
 
-transform = transforms.Compose(
-    [
-        transforms.Resize(224),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
+def extract_hand_output(output, hand_type, hand_info, top_finger_joints_type='ave', use_cuda=True):
+    assert hand_type in ['left', 'right']
 
-transform_visualize = transforms.Compose([transforms.Resize(224), transforms.CenterCrop(224), transforms.ToTensor()])
+    if hand_type == 'left':
+        wrist_idx, hand_start_idx, middle_finger_idx = 20, 25, 28
+    else:
+        wrist_idx, hand_start_idx, middle_finger_idx = 21, 40, 43
 
+    vertices = output.vertices
+    joints = output.joints
+    vertices_shift = vertices - joints[:, hand_start_idx:hand_start_idx+1, :]
+
+    hand_verts_idx = torch.Tensor(hand_info[f'{hand_type}_hand_verts_idx']).long()
+    if use_cuda:
+        hand_verts_idx = hand_verts_idx.cuda()
+
+    hand_verts = vertices[:, hand_verts_idx, :]
+    hand_verts_shift = hand_verts - joints[:, hand_start_idx:hand_start_idx+1, :]
+
+   # Hand joints
+    if hand_type == 'left':
+        hand_idxs =  [20] + list(range(25,40)) + list(range(66, 71)) # 20 for left wrist. 20 finger joints
+    else:
+        hand_idxs = [21] + list(range(40,55)) + list(range(71, 76)) # 21 for right wrist. 20 finger joints
+    smplx_hand_to_panoptic = [0, 13,14,15,16, 1,2,3,17, 4,5,6,18, 10,11,12,19, 7,8,9,20] 
+    hand_joints = joints[:, hand_idxs, :][:, smplx_hand_to_panoptic, :]
+    hand_joints_shift = hand_joints - joints[:, hand_start_idx:hand_start_idx+1, :]
+
+    output = dict(
+        wrist_idx = wrist_idx,
+        hand_start_idx = hand_start_idx,
+        middle_finger_idx = middle_finger_idx,
+        vertices_shift = vertices_shift,
+        hand_vertices = hand_verts,
+        hand_vertices_shift = hand_verts_shift,
+        hand_joints = hand_joints,
+        hand_joints_shift = hand_joints_shift
+    )
+    return output
 
 class HandMocap:
     def __init__(self, regressor_checkpoint, smpl_dir, device=torch.device("cuda"), use_smplx=False):
@@ -42,12 +71,11 @@ class HandMocap:
         self.normalize_transform = transforms.Compose(transform_list)
 
         # Load Hand network
-        self.opt = MeshGraphormerOptions().parse([])
+        self.opt = TestOptions().parse([])
 
         # Default options
         self.opt.single_branch = True
         self.opt.main_encoder = "resnet50"
-        # self.opt.data_root = "/home/hjoo/dropbox/hand_yu/data/"
         self.opt.model_root = "./extra_data"
         self.opt.smplx_model_file = os.path.join(smpl_dir, "SMPLX_NEUTRAL.pkl")
 
@@ -62,119 +90,63 @@ class HandMocap:
         self.opt.process_rank = -1
 
         # self.opt.which_epoch = str(epoch)
-        # Load Mesh Graphormer model
-        # Load pretrained model
-        trans_encoder = []
 
-        input_feat_dim = [int(item) for item in self.opt.input_feat_dim.split(",")]
-        hidden_feat_dim = [int(item) for item in self.opt.hidden_feat_dim.split(",")]
-        output_feat_dim = input_feat_dim[1:] + [3]
+        # Get cfg for hands4whole model
+        self.cfg = cfg
+        self.cfg.set_args(self.opt.gpu_ids)
+        # Get body bbox detector
+        self.bbox_detector = BodyPoseEstimator()
 
-        # which encoder block to have graph convs
-        which_blk_graph = [int(item) for item in self.opt.which_gcn.split(",")]
+        # Get hand4whole model
+        # snapshot load
+        model_path = './snapshot_6.pth.tar'
+        assert osp.exists(model_path), 'Cannot find model at ' + model_path
+        print('Load checkpoint from {}'.format(model_path))
+        self.model_regressor = get_model('test')
+        self.model_regressor = DataParallel(self.model_regressor).cuda()
+        ckpt = torch.load(model_path)
+        self.model_regressor.load_state_dict(ckpt['network'], strict=False)
+        self.model_regressor.eval()
 
-        # init three transformer-encoder blocks in a loop
-        for i in range(len(output_feat_dim)):
-            config_class, model_class = BertConfig, Graphormer
-            config = config_class.from_pretrained(
-                self.opt.config_name if self.opt.config_name else self.opt.model_name_or_path
-            )
+         # load smplx-hand faces
+        hand_info_file = osp.join(self.opt.model_root, self.opt.smplx_hand_info_file)
 
-            config.output_attentions = False
-            config.img_feature_dim = input_feat_dim[i]
-            config.output_feature_dim = output_feat_dim[i]
-            self.opt.hidden_size = hidden_feat_dim[i]
-            self.opt.intermediate_size = int(self.opt.hidden_size * 2)
+        self.hand_info = gnu.load_pkl(hand_info_file)
+        self.right_hand_faces_holistic = self.hand_info["right_hand_faces_holistic"]
+        self.right_hand_faces_local = self.hand_info["right_hand_faces_local"]
+        
+        smplx_model_path = self.opt.smplx_model_file
+        self.smplx = smplx.create(smplx_model_path, 
+            model_type = "smplx", 
+            batch_size = self.batch_size,
+            gender = 'neutral',
+            num_betas = 10,
+            use_pca = False,
+            ext='pkl').cuda()
 
-            if which_blk_graph[i] == 1:
-                config.graph_conv = True
-                # logger.info("Add Graph Conv")
-            else:
-                config.graph_conv = False
+    def get_smplx_output(self, pose_params, shape_params=None):
+        hand_rotation = pose_params[:, :3]
+        hand_pose = pose_params[:, 3:]
+        body_pose = torch.zeros((self.batch_size, 63)).float().cuda() 
+        body_pose[:, 60:] = hand_rotation # set right hand rotation
 
-            config.mesh_type = self.opt.mesh_type
+        output = self.smplx(
+            global_orient = self.global_orient,
+            body_pose = body_pose,
+            right_hand_pose = hand_pose,
+            betas = shape_params,
+            return_verts = True)
+        
+        hand_output = extract_hand_output(
+            output, 
+            hand_type = 'right', 
+            hand_info = self.hand_info,
+            top_finger_joints_type = self.top_finger_joints_type, 
+            use_cuda=True)
 
-            # update model structure if specified in arguments
-            update_params = ["num_hidden_layers", "hidden_size", "num_attention_heads", "intermediate_size"]
-            for idx, param in enumerate(update_params):
-                arg_param = getattr(self.opt, param)
-                config_param = getattr(config, param)
-                if arg_param > 0 and arg_param != config_param:
-                    # logger.info("Update config parameter {}: {} -> {}".format(param, config_param, arg_param))
-                    setattr(config, param, arg_param)
-
-            # init a transformer encoder and append it to a list
-            assert config.hidden_size % config.num_attention_heads == 0
-            model = model_class(config=config)
-            # logger.info("Init model from scratch.")
-            trans_encoder.append(model)
-
-        # create backbone model
-        if self.opt.arch == "hrnet":
-            "handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
-            hrnet_yaml = (
-                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
-            )
-            hrnet_checkpoint = (
-                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w40_imagenet_pretrained.pth"
-            )
-            hrnet_update_config(hrnet_config, hrnet_yaml)
-            backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
-            # logger.info('=> loading hrnet-v2-w40 model')
-        elif self.opt.arch == "hrnet-w64":
-            hrnet_yaml = (
-                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
-            )
-            hrnet_checkpoint = (
-                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w64_imagenet_pretrained.pth"
-            )
-            hrnet_update_config(hrnet_config, hrnet_yaml)
-            backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
-            # logger.info('=> loading hrnet-v2-w64 model')
-        else:
-            print("=> using pre-trained model '{}'".format(self.opt.arch))
-            backbone = models.__dict__[self.opt.arch](pretrained=True)
-            # remove the last fc layer
-            backbone = torch.nn.Sequential(*list(backbone.children())[:-1])
-
-        trans_encoder = torch.nn.Sequential(*trans_encoder)
-        total_params = sum(p.numel() for p in trans_encoder.parameters())
-        # logger.info('Graphormer encoders total parameters: {}'.format(total_params))
-        backbone_total_params = sum(p.numel() for p in backbone.parameters())
-        # logger.info('Backbone total parameters: {}'.format(backbone_total_params))
-
-        # build end-to-end Graphormer network (CNN backbone + multi-layer Graphormer encoder)
-        self.model_regressor = Graphormer_Network(self.opt, config, backbone, trans_encoder)
-
-        graphormer_model_path = (
-            "./handmocap/hand_modules/MeshGraphormer/models/graphormer_release/graphormer_hand_state_dict.bin"
-        )
-        # for fine-tuning or resume training or inference, load weights from checkpoint
-        # logger.info("Loading state dict from checkpoint {}".format(graphormer_model_path))
-        # workaround approach to load sparse tensor in graph conv.
-        state_dict = torch.load(graphormer_model_path)
-        self.model_regressor.load_state_dict(state_dict, strict=False)
-        del state_dict
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # update configs to enable attention outputs
-        setattr(self.model_regressor.trans_encoder[-1].config, "output_attentions", True)
-        setattr(self.model_regressor.trans_encoder[-1].config, "output_hidden_states", True)
-        self.model_regressor.trans_encoder[-1].bert.encoder.output_attentions = True
-        self.model_regressor.trans_encoder[-1].bert.encoder.output_hidden_states = True
-        for iter_layer in range(4):
-            self.model_regressor.trans_encoder[-1].bert.encoder.layer[
-                iter_layer
-            ].attention.self.output_attentions = True
-        for inter_block in range(3):
-            setattr(self.model_regressor.trans_encoder[-1].config, "device", device)
-
-        self.model_regressor.to(device)
-
-        self.mano_model = MANO().to(device)
-        self.mano_model.layer = self.mano_model.layer.cuda()
-        self.mesh_sampler = Mesh()
+        pred_verts = hand_output['vertices_shift']
+        pred_joints_3d = hand_output['hand_joints_shift']
+        return pred_verts, pred_joints_3d
 
     def __pad_and_resize(self, img, hand_bbox, add_margin, final_size=224):
         ori_height, ori_width = img.shape[:2]
@@ -259,14 +231,9 @@ class HandMocap:
         Note:
             Output element can be None. This is to keep the same output size with input bbox
         """
-        pred_output_list = list()
-        hand_bbox_list_processed = list()
-        # load smplx-hand faces
-        hand_info_file = osp.join(self.opt.model_root, self.opt.smplx_hand_info_file)
-
-        self.hand_info = gnu.load_pkl(hand_info_file)
-        self.right_hand_faces_holistic = self.hand_info["right_hand_faces_holistic"]
-        self.right_hand_faces_local = self.hand_info["right_hand_faces_local"]
+        
+        with torch.no_grad():
+            out = self.model_regressor(inputs, targets, meta_info, "test")
 
         for hand_bboxes in hand_bbox_list:
 
@@ -289,36 +256,29 @@ class HandMocap:
                     )
                     hand_bboxes_processed[hand_type] = bbox_processed
 
-                    # img_tensor = transform(to_pil_image(norm_img))
-                    img_tensor = transform(to_pil_image(img_cropped))
-
-                    batch_imgs = torch.unsqueeze(img_tensor, 0).cuda()
                     ### 여기에 모델 인퍼런스 입력하면 될듯
-                    ## 입력 224x224 이미지
+                    ## 입력 Whole Body image
+                    ## 출력: smplx whole body -> 각 손별로 convert_smpl to bbox해야할듯
                     with torch.no_grad():
                         # pred_rotmat, pred_betas, pred_camera = self.model_regressor(norm_img.to(self.device))
-                        regress_result = self.model_regressor(batch_imgs, self.mano_model, self.mesh_sampler)
-                        if len(regress_result) == 4:
-                            cam, pred_joints, pred_verticies_sub, pred_verts_origin = regress_result
-                        else:
-                            cam, pred_joints, pred_verticies_sub, pred_verts_origin, _, __ = regress_result
-
-                        pred_verticies_sub = torch.squeeze(pred_verticies_sub, dim=0)
-                        pred_verts_origin = torch.squeeze(pred_verts_origin, dim=0)
-                        pred_joints = torch.squeeze(pred_joints, dim=0)
+                        cam = out["cam_param"]
                         faces = self.right_hand_faces_local
+                        pred_verts_origin = 
+
 
                         if hand_type == "left_hand":
                             cam[1] *= -1
                             faces = faces[:, ::-1]
                             pred_verts_origin[:, 0] *= -1
-                            pred_joints[:, 0] *= -1
 
                         pred_output[hand_type] = dict()
                         pred_output[hand_type][
                             "pred_vertices_smpl"
                         ] = pred_verts_origin  # SMPL-X hand vertex in bbox space
-                        pred_output[hand_type]["pred_joints_smpl"] = pred_joints
+                        if hand_type =="left_hand":
+                            pred_output[hand_type]["pred_joints_smpl"] = out["smplx_lhand_pose"]
+                        else:
+                            pred_output[hand_type]["pred_joints_smpl"] = out["smplx_rhand_pose"] 
                         pred_output[hand_type]["faces"] = faces
 
                         pred_output[hand_type]["bbox_scale_ratio"] = bbox_scale_ratio

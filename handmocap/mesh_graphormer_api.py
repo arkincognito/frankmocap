@@ -23,18 +23,17 @@ from torchvision.transforms.functional import to_pil_image
 import mocap_utils.general_utils as gnu
 
 
-transform = transforms.Compose([           
-                    transforms.Resize(224),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                    transforms.Normalize(
-                        mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225])])
+transform = transforms.Compose(
+    [
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
 
-transform_visualize = transforms.Compose([           
-                    transforms.Resize(224),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor()])
+transform_visualize = transforms.Compose([transforms.Resize(224), transforms.CenterCrop(224), transforms.ToTensor()])
+
 
 class HandMocap:
     def __init__(self, regressor_checkpoint, smpl_dir, device=torch.device("cuda"), use_smplx=False):
@@ -67,26 +66,27 @@ class HandMocap:
         # Load pretrained model
         trans_encoder = []
 
-        input_feat_dim = [int(item) for item in self.opt.input_feat_dim.split(',')]
-        hidden_feat_dim = [int(item) for item in self.opt.hidden_feat_dim.split(',')]
+        input_feat_dim = [int(item) for item in self.opt.input_feat_dim.split(",")]
+        hidden_feat_dim = [int(item) for item in self.opt.hidden_feat_dim.split(",")]
         output_feat_dim = input_feat_dim[1:] + [3]
 
         # which encoder block to have graph convs
-        which_blk_graph = [int(item) for item in self.opt.which_gcn.split(',')]
+        which_blk_graph = [int(item) for item in self.opt.which_gcn.split(",")]
 
         # init three transformer-encoder blocks in a loop
         for i in range(len(output_feat_dim)):
             config_class, model_class = BertConfig, Graphormer
-            config = config_class.from_pretrained(self.opt.config_name if self.opt.config_name \
-                    else self.opt.model_name_or_path)
+            config = config_class.from_pretrained(
+                self.opt.config_name if self.opt.config_name else self.opt.model_name_or_path
+            )
 
             config.output_attentions = False
-            config.img_feature_dim = input_feat_dim[i] 
+            config.img_feature_dim = input_feat_dim[i]
             config.output_feature_dim = output_feat_dim[i]
             self.opt.hidden_size = hidden_feat_dim[i]
-            self.opt.intermediate_size = int(self.opt.hidden_size*2)
+            self.opt.intermediate_size = int(self.opt.hidden_size * 2)
 
-            if which_blk_graph[i]==1:
+            if which_blk_graph[i] == 1:
                 config.graph_conv = True
                 # logger.info("Add Graph Conv")
             else:
@@ -95,7 +95,7 @@ class HandMocap:
             config.mesh_type = self.opt.mesh_type
 
             # update model structure if specified in arguments
-            update_params = ['num_hidden_layers', 'hidden_size', 'num_attention_heads', 'intermediate_size']
+            update_params = ["num_hidden_layers", "hidden_size", "num_attention_heads", "intermediate_size"]
             for idx, param in enumerate(update_params):
                 arg_param = getattr(self.opt, param)
                 config_param = getattr(config, param)
@@ -105,27 +105,35 @@ class HandMocap:
 
             # init a transformer encoder and append it to a list
             assert config.hidden_size % config.num_attention_heads == 0
-            model = model_class(config=config) 
+            model = model_class(config=config)
             # logger.info("Init model from scratch.")
             trans_encoder.append(model)
-        
+
         # create backbone model
-        if self.opt.arch=='hrnet':
+        if self.opt.arch == "hrnet":
             "handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
-            hrnet_yaml = './handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
-            hrnet_checkpoint = './handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w40_imagenet_pretrained.pth'
+            hrnet_yaml = (
+                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w40_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
+            )
+            hrnet_checkpoint = (
+                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w40_imagenet_pretrained.pth"
+            )
             hrnet_update_config(hrnet_config, hrnet_yaml)
             backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             # logger.info('=> loading hrnet-v2-w40 model')
-        elif self.opt.arch=='hrnet-w64':
-            hrnet_yaml = './handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml'
-            hrnet_checkpoint = './handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w64_imagenet_pretrained.pth'
+        elif self.opt.arch == "hrnet-w64":
+            hrnet_yaml = (
+                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/cls_hrnet_w64_sgd_lr5e-2_wd1e-4_bs32_x100.yaml"
+            )
+            hrnet_checkpoint = (
+                "./handmocap/hand_modules/MeshGraphormer/models/hrnet/hrnetv2_w64_imagenet_pretrained.pth"
+            )
             hrnet_update_config(hrnet_config, hrnet_yaml)
             backbone = get_cls_net_gridfeat(hrnet_config, pretrained=hrnet_checkpoint)
             # logger.info('=> loading hrnet-v2-w64 model')
         else:
             print("=> using pre-trained model '{}'".format(self.opt.arch))
-            backbone = models.__dict__[self.opt.arch](pretrained=True)
+            backbone = model.__dict__[self.opt.arch](pretrained=True)
             # remove the last fc layer
             backbone = torch.nn.Sequential(*list(backbone.children())[:-1])
 
@@ -138,7 +146,9 @@ class HandMocap:
         # build end-to-end Graphormer network (CNN backbone + multi-layer Graphormer encoder)
         self.model_regressor = Graphormer_Network(self.opt, config, backbone, trans_encoder)
 
-        graphormer_model_path = "./handmocap/hand_modules/MeshGraphormer/models/graphormer_release/graphormer_hand_state_dict.bin"
+        graphormer_model_path = (
+            "./handmocap/hand_modules/MeshGraphormer/models/graphormer_release/graphormer_hand_state_dict.bin"
+        )
         # for fine-tuning or resume training or inference, load weights from checkpoint
         # logger.info("Loading state dict from checkpoint {}".format(graphormer_model_path))
         # workaround approach to load sparse tensor in graph conv.
@@ -167,6 +177,9 @@ class HandMocap:
         self.mesh_sampler = Mesh()
 
     def __pad_and_resize(self, img, hand_bbox, add_margin, final_size=224):
+        """
+        Box margin for mesh graphormer is 1.0
+        """
         ori_height, ori_width = img.shape[:2]
         min_x, min_y = hand_bbox[:2].astype(np.int32)
         width, height = hand_bbox[2:].astype(np.int32)
@@ -184,7 +197,7 @@ class HandMocap:
 
         # add additional margin
         if add_margin:
-            margin = int(0.3 * (max_y - min_y))  # if use loose crop, change 0.3 to 1.0
+            margin = int(1.0 * (max_y - min_y))  # if use loose crop, change 0.3 to 1.0
             min_y = max(min_y - margin, 0)
             max_y = min(max_y + margin, ori_height)
             min_x = max(min_x - margin, 0)
@@ -255,8 +268,8 @@ class HandMocap:
         hand_info_file = osp.join(self.opt.model_root, self.opt.smplx_hand_info_file)
 
         self.hand_info = gnu.load_pkl(hand_info_file)
-        self.right_hand_faces_holistic = self.hand_info['right_hand_faces_holistic']        
-        self.right_hand_faces_local = self.hand_info['right_hand_faces_local']
+        self.right_hand_faces_holistic = self.hand_info["right_hand_faces_holistic"]
+        self.right_hand_faces_local = self.hand_info["right_hand_faces_local"]
 
         for hand_bboxes in hand_bbox_list:
 
@@ -278,17 +291,16 @@ class HandMocap:
                         img_original, hand_bboxes[hand_type], hand_type, add_margin
                     )
                     hand_bboxes_processed[hand_type] = bbox_processed
-                    
-                    img_tensor = transform(to_pil_image(norm_img))
+
+                    # img_tensor = transform(to_pil_image(norm_img))
+                    img_tensor = transform(to_pil_image(img_cropped))
 
                     batch_imgs = torch.unsqueeze(img_tensor, 0).cuda()
                     ### 여기에 모델 인퍼런스 입력하면 될듯
                     ## 입력 224x224 이미지
                     with torch.no_grad():
                         # pred_rotmat, pred_betas, pred_camera = self.model_regressor(norm_img.to(self.device))
-                        regress_result = self.model_regressor(
-                            batch_imgs, self.mano_model, self.mesh_sampler
-                        )
+                        regress_result = self.model_regressor(batch_imgs, self.mano_model, self.mesh_sampler)
                         if len(regress_result) == 4:
                             cam, pred_joints, pred_verticies_sub, pred_verts_origin = regress_result
                         else:

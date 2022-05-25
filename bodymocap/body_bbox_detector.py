@@ -69,7 +69,7 @@ class BodyPoseEstimator(object):
 
         return heatmaps, pafs, scale, pad
     
-    def detect_body_pose(self, img):
+    def detect_body_pose(self, img, margin=0.05):
         """
         Output:
             current_bbox: BBOX_XYWH
@@ -117,7 +117,6 @@ class BodyPoseEstimator(object):
         # enlarge the bbox
         for i, bbox in enumerate(current_bbox):
             x, y, w, h = bbox
-            margin = 0.05
             x_margin = int(w * margin)
             y_margin = int(h * margin)
             x0 = max(x-x_margin, 0)
