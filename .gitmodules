@@ -4,6 +4,3 @@
 [submodule "handmocap/hand_modules/apex"]
 	path = handmocap/hand_modules/apex
 	url = https://github.com/NVIDIA/apex.git
-[submodule "handmocap/hand_modules/--force"]
-	path = handmocap/hand_modules/--force
-	url = https://github.com/arkincognito/Hand4Whole_RELEASE.git
